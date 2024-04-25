@@ -1,0 +1,376 @@
+---
+title: "PROY"
+output: html_document
+date: "2024-04-20"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+```{r}
+library(dplyr)
+library(lubridate)
+library(tidyverse)
+library(corrplot)
+library(ggplot2)
+library(reshape2)
+library(cluster)
+
+# Load the data
+data <- read.csv("base_trabajo_2.csv", stringsAsFactors = FALSE)
+
+# Initial exploration
+head(data)
+summary(data)
+
+# Data structure
+str(data)
+
+# Check for NA values
+sapply(data, function(x) sum(is.na(x)))
+
+# Statistical summary
+summary(data)
+
+# Remove the first column if it's just an index
+data <- data[,-1]
+
+# Convert the time column to date format
+data$time <- as.POSIXct(data$time, format="%Y-%m-%d %H:%M:%S")
+
+# Handle missing values
+data <- na.omit(data)
+
+# Descriptive statistical analysis
+summary(data)
+
+```
+
+```{r}
+# Correlations between major numeric variables
+cor_data <- cor(data[, sapply(data, is.numeric)])
+corrplot::corrplot(cor_data, method = "circle")
+
+# General energy usage over time
+ggplot(data = data, aes(x = time, y = House.overall..kW.)) +
+  geom_line() + 
+  labs(title = "Energy Consumption Over Time", x = "Time", y = "Energy Consumption (kW)")
+
+# Boxplots to compare energy usage of different devices
+ggplot(data = melt(data[, c("Dishwasher..kW.", "Furnace.1..kW.", "Home.office..kW.")]),
+       aes(x = variable, y = value)) +
+  geom_boxplot() +
+  labs(title = "Comparison of Energy Consumption by Device", x = "Device", y = "Energy Consumption (kW)") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+# Relationship between energy consumption and external variables like temperature
+ggplot(data = data, aes(x = temperature, y = House.overall..kW.)) +
+  geom_point(aes(color = temperature)) +
+  geom_smooth(method = "lm") +
+  labs(title = "Relationship between Temperature and Energy Consumption", x = "Temperature", y = "Energy Consumption (kW)")
+```
+
+```{r}
+# Add a column for the day of the week (0 = Sunday, 6 = Saturday)
+data$weekday <- weekdays(data$time)
+
+# Define the order of the days of the week in English
+weekday_order <- c("lunes", "martes", "miércoles", "jueves", "viernes", "sábado", "domingo")
+
+# Reorder the "weekday" column according to the specified order
+data$weekday <- factor(data$weekday, levels = weekday_order)
+
+# Add a column for the hour of the day
+data$hour <- format(data$time, format = "%H")
+# Calculate the total consumption of the house by day of the week
+house_consumption_by_weekday <- aggregate(House.overall..kW. ~ weekday, data = data, sum)
+
+# Calculate the total consumption of the house by hour of the day
+house_consumption_by_hour <- aggregate(House.overall..kW. ~ hour, data = data, sum)
+
+# Create bar plots for house consumption by day of the week
+barplot(house_consumption_by_weekday$House.overall..kW., 
+        names.arg = house_consumption_by_weekday$weekday,
+        main = "House Consumption by Day of the Week",
+        xlab = "Day of the Week", ylab = "Consumption (kW)",
+        col = "coral")
+
+# Create bar plots for house consumption by hour of the day
+barplot(house_consumption_by_hour$House.overall..kW.,
+        names.arg = house_consumption_by_hour$hour,
+        main = "House Consumption by Hour of the Day",
+        xlab = "Hour of the Day", ylab = "Consumption (kW)",
+        col = "skyblue")
+
+```
+
+```{r}
+# Strategy 1: Clustering Based on Functionality
+# Create a mapping of each device to its functional group
+device_groups <- tibble(
+  device = c("Microwave..kW.","Dishwater..kW.","Home.office..kW.", "Garage.door..kW.", "Living.room..kW.", "Kitchen.12..kW.", "Kitchen.14..kW.",
+             "Kitchen.38..kW.", "Wine.cellar..kW.", "Fridge..kW.", "Furnace.1..kW.", "Furnace.2..kW.", "Well..kW.", 
+             "Barn..kW."),
+  group = c("Essential Services","Essential Services","Work Area", "Work Area", "Living and Entertainment", "Living and Entertainment",
+            "Living and Entertainment", "Living and Entertainment", "Living and Entertainment",
+            "Essential Services", "Essential Services", "Essential Services", "Essential Services", "Work Area")
+)
+
+# Add the group information to the data and filter out rows without group assignment
+data1 <- data %>%
+  pivot_longer(cols = matches("\\.kW\\.$"), names_to = "device", values_to = "consumption") %>%
+  left_join(device_groups, by = "device") %>%
+  filter(!is.na(group))  # Only keep rows where 'group' is not NA
+
+# Calculate the total consumption for each functional group
+grouped_consumption <- data1 %>%
+  group_by(group) %>%
+  summarize(Total_Consumption = sum(consumption, na.rm = TRUE))
+
+# Plot the total consumption by functional group
+# Plot the total consumption by functional group with angled title
+ggplot(grouped_consumption, aes(x = group, y = Total_Consumption, fill = group)) +
+  geom_bar(stat = "identity") +
+  labs(title = "Total Consumption by Functional Group", x = "Functional Group", y = "Total Consumption (kW)") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))  # Angle the x-axis labels
+
+
+
+```
+
+```{r}
+# Load required libraries
+library(ggplot2)
+library(caret)
+library(lubridate)
+
+# Extract day from the time column
+data$day <- day(data$time)
+
+# Aggregate total energy consumption per day
+daily_consumption <- aggregate(House.overall..kW. ~ day, data = data, sum)
+
+# Split data into training and testing sets
+set.seed(123)  # For reproducibility
+train_index <- sample(1:nrow(daily_consumption), 0.8 * nrow(daily_consumption))
+train_data <- daily_consumption[train_index, ]
+test_data <- daily_consumption[-train_index, ]
+
+# Build regression model
+lm_model <- lm(House.overall..kW. ~ day, data = train_data)
+
+# Make predictions on test data
+predictions <- predict(lm_model, newdata = test_data)
+
+# Evaluate the model
+rmse <- sqrt(mean((test_data$House.overall..kW. - predictions)^2))
+r_squared <- summary(lm_model)$r.squared
+
+# Plot actual vs. predicted values
+ggplot(data = test_data, aes(x = day, y = House.overall..kW.)) +
+  geom_point(color = "blue", size = 3) +
+  geom_line(aes(y = predictions), color = "red", size = 1) +
+  labs(title = "Actual vs. Predicted Daily Energy Consumption",
+       x = "Day", y = "Energy Consumption (kW)") +
+  theme_minimal()
+
+# Print evaluation metrics
+print(paste("RMSE:", rmse))
+print(paste("R-squared:", r_squared))
+
+
+```
+```{r}
+library(forecast)
+library(lubridate)
+
+data$month <- month(data$time)
+
+# Agrupar los datos por mes, día y hora y calcular el consumo total de la casa en esa hora
+hourly_data <- data %>%
+  group_by(month, day, hour) %>%
+  summarize(total_consumption = sum(House.overall..kW., na.rm = TRUE), .groups = 'drop')
+
+# Supongamos que quieres predecir para el último mes presente en los datos
+last_month <- max(hourly_data$month)
+
+# Filtrar los datos para todos menos el último mes para entrenar el modelo
+training_data <- hourly_data %>%
+  filter(month != last_month)
+
+# Convertir los datos a una serie de tiempo (asumiendo un año no bisiesto)
+ts_data <- ts(training_data$total_consumption, frequency = 24 * 30 * 11)
+
+# Ajustar modelo ARIMA
+arima_model <- auto.arima(ts_data)
+
+# Predecir el consumo futuro para cada hora de cada día del último mes 
+forecast_values <- forecast(arima_model, h = 24 * 30)  # Ajustar según el número de días del último mes si es necesario
+
+# Extraer las predicciones
+predictions <- forecast_values$mean
+
+# Preparar los datos de las predicciones para su visualización
+predicted_data <- data.frame(time = seq(length.out = length(predictions)), predicted_consumption = predictions)
+
+# Unir los datos predichos con los reales del último mes
+actual_data <- hourly_data %>%
+  filter(month == last_month) %>%
+  mutate(time = row_number())
+
+# Crear el gráfico de valores predichos vs reales
+ggplot() +
+  geom_line(data = actual_data, aes(x = time, y = total_consumption), color = "blue", alpha = 0.5, size = 1) +  # Valores reales
+  geom_line(data = predicted_data, aes(x = time, y = predicted_consumption), color = "red", size = 1) +  # Valores predichos
+  labs(title = "Predicted vs Actual Hourly Consumption for Last Month",
+       x = "Time (Hourly intervals)",
+       y = "Total House Consumption (kW)") +
+  theme_minimal()
+
+
+```
+
+```{r}
+# Cargar las bibliotecas necesarias
+library(dplyr)
+library(forecast)
+library(ggplot2)
+library(lubridate)
+# Convertir 'time' a POSIXct si no está convertido
+data$time <- as.POSIXct(data$time, format="%Y-%m-%d %H:%M:%S")
+
+# Agregar columnas para mes, día y hora para facilitar agrupaciones
+data <- data %>%
+  mutate(hour = hour(time),
+         day = day(time),
+         month = month(time),
+         year = year(time))
+
+# Identificar el último año con datos completos
+last_full_year <- max(data$year)
+
+# Dividir los datos en entrenamiento y prueba
+training_data <- data %>%
+  filter(year != last_full_year | month != 12)
+test_data <- data %>%
+  filter(year == last_full_year & month == 12)
+
+# Agrupar y sumar por mes, día y hora
+train_hourly <- training_data %>%
+  group_by(year, month, day, hour) %>%
+  summarize(total_consumption = sum(House.overall..kW., na.rm = TRUE), .groups = 'drop')
+test_hourly <- test_data %>%
+  group_by(year, month, day, hour) %>%
+  summarize(total_consumption = sum(House.overall..kW., na.rm = TRUE), .groups = 'drop')
+
+# Crear serie temporal
+ts_train <- ts(train_hourly$total_consumption, frequency = 24*365.25)
+
+# Transformar los datos
+ts_train_log <- log(ts_train)
+
+# Ajustar un modelo ARIMA
+model <- auto.arima(ts_train_log, seasonal = TRUE, stepwise = FALSE, approximation = FALSE)
+
+# Comprobar los residuos
+checkresiduals(model)
+
+# Descomponer la serie para visualizar la estacionalidad y la tendencia
+#decomposed <- decompose(ts_train_log)
+#plot(decomposed)
+
+# Predecir los valores para el último mes registrado
+predictions <- forecast(model, h = nrow(test_hourly))
+
+# Revertir la transformación logarítmica
+predictions$mean <- exp(predictions$mean)
+
+# Crear data frame para comparar valores predichos con reales
+comparison <- data.frame(time = paste(test_hourly$day, "-", test_hourly$month, test_hourly$hour, ":00", sep=""),
+                         Actual = test_hourly$total_consumption,
+                         Predicted = as.vector(predictions$mean))
+
+# Calcular el RMSE
+rmse <- sqrt(mean((comparison$Actual - comparison$Predicted)^2))
+print(paste("RMSE: ", rmse))
+
+# Gráfico de los valores reales vs predicciones
+ggplot(comparison, aes(x = time)) +
+  geom_line(aes(y = Actual, colour = "Actual")) +
+  geom_line(aes(y = Predicted, colour = "Predicted")) +
+  labs(title = "Comparison of Actual vs Predicted Consumption",
+       x = "Time (Hourly Intervals)",
+       y = "Total Consumption (kW)") +
+  scale_colour_manual("", values = c(Actual = "blue", Predicted = "red")) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5))
+
+```
+```{r}
+# Convertir 'time' a POSIXct si no está convertido
+data$time <- as.POSIXct(data$time, format="%Y-%m-%d %H:%M:%S")
+
+# Agregar columnas para mes, día y hora para facilitar agrupaciones
+data <- data %>%
+  mutate(hour = hour(time),
+         day = day(time),
+         month = month(time),
+         year = year(time))
+
+# Identificar el último año con datos completos
+last_full_year <- max(data$year)
+
+# Dividir los datos en entrenamiento y prueba
+training_data <- data %>%
+  filter(year != last_full_year | month != 12)
+test_data <- data %>%
+  filter(year == last_full_year & month == 12)
+
+# Agrupar y sumar por mes, día y hora
+train_hourly <- training_data %>%
+  group_by(year, month, day, hour) %>%
+  summarize(total_consumption = sum(House.overall..kW., na.rm = TRUE), .groups = 'drop')
+test_hourly <- test_data %>%
+  group_by(year, month, day, hour) %>%
+  summarize(total_consumption = sum(House.overall..kW., na.rm = TRUE), .groups = 'drop')
+
+# Crear serie temporal
+ts_train <- ts(train_hourly$total_consumption, frequency = 24)
+
+# Transformar los datos
+ts_train_log <- log(ts_train)
+
+# Ajustar un modelo ARIMA
+model <- auto.arima(ts_train_log, seasonal = TRUE, stepwise = FALSE, approximation = FALSE)
+
+# Predecir los valores para el último mes registrado
+predictions <- forecast(model, h = nrow(test_hourly))
+
+# Revertir la transformación logarítmica
+predictions$mean <- exp(predictions$mean)
+
+# Crear data frame para comparar valores predichos con reales
+comparison <- data.frame(time = paste(test_hourly$day, "-", test_hourly$month, test_hourly$hour, ":00", sep=""),
+                         Actual = test_hourly$total_consumption,
+                         Predicted = as.vector(predictions$mean))
+
+# Calcular el RMSE
+rmse <- sqrt(mean((comparison$Actual - comparison$Predicted)^2))
+print(paste("RMSE: ", rmse))
+
+# Gráfico de los valores reales vs predicciones
+ggplot(comparison, aes(x = time)) +
+  geom_line(aes(y = Actual, colour = "Actual")) +
+  geom_line(aes(y = Predicted, colour = "Predicted")) +
+  labs(title = "Comparison of Actual vs Predicted Consumption",
+       x = "Time (Hourly Intervals)",
+       y = "Total Consumption (kW)") +
+  scale_colour_manual("", values = c(Actual = "blue", Predicted = "red")) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5))
+
+```
+
